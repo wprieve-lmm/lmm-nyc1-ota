@@ -1,0 +1,884 @@
+#include <Adafruit_NeoPixel.h>
+#include <vector>
+#include <array>
+#include <string>
+#include <iostream>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <Preferences.h>
+#include <HTTPClient.h>
+#include <HTTPUpdate.h>
+#include <esp_ota_ops.h>
+#include <ArduinoJson.h>
+#include <WiFiClientSecure.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+
+// WiFi Setup Configuration
+const char* ap_ssid = "SubwayBoard";
+const char* ap_password = "1234567S";
+String mac = "";
+
+// Server Configuration
+const char* serverURLlive = "http://159.203.91.91:5000/color";
+const char* serverURLbackup = "http://159.203.91.91:5001/data";
+const char* serverURL;
+
+// UUID for BLE
+
+#define SERVICE_UUID "24218350-9437-4547-b2c7-9a32c175cb46";
+#define CHARACTERISTIC_UUID "6eec36ed-4f98-432b-bf39-101574418fea";
+
+//Firmware update info
+
+const char* FIRMWARE_VERSION = "1.0.5";
+const char* FIRMWARE_URL = "https://raw.githubusercontent.com/wprieve-lmm/lmm-nyc1-ota/main/CS203firmware.bin";
+const char* VERSION_URL = "https://raw.githubusercontent.com/wprieve-lmm/lmm-nyc1-ota/main/CS203version.txt"; 
+
+// Web server and DNS server for WiFi setup
+WebServer server(80);
+DNSServer dnsServer;
+Preferences preferences;
+
+// Variables to store WiFi credentials
+String stored_ssid = "";
+String stored_password = "";
+bool ap_mode = false;
+
+bool mode = true;
+bool live = true;
+bool safemode = false;
+bool brightnessUpPressed = false;
+bool brightnessDownPressed = false;
+bool modeButtonPressed = false;
+unsigned long modeButtonPressTime = 0;
+unsigned long lastColorUpdate = 0;
+const unsigned long colorUpdateInterval = 10000; // 10 seconds
+
+// LED Strip Configuration
+int brightness = 10;
+int consecutiveFailures = 0;
+
+Adafruit_NeoPixel ws2812b1(141, 4, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel ws2812b2(137, 5, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel ws2812b3(157, 6, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel ws2812b4(149, 7, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel ws2812b5(130, 15, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel ws2812b6(128, 16, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel ws2812b7(127, 17, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel ws2812b8(146, 18, NEO_GRB + NEO_KHZ800);
+
+//HTML page for WiFi setup
+const char* html_page = R"(
+<!DOCTYPE html>
+<html>
+<head>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>LiveMetroMap - NYC WiFi Setup</title>
+<style>
+body{font-family:Arial;max-width:400px;margin:50px auto;padding:20px}
+h2{color:#0066cc}
+input,button{width:100%;padding:10px;margin:10px 0;box-sizing:border-box;font-size:16px}
+button{background:#0066cc;color:#fff;border:none;cursor:pointer}
+button:hover{background:#0052a3}
+.msg{padding:10px;margin:10px 0;border-radius:4px;display:none}
+.success{background:#d4edda;color:#155724}
+.error{background:#f8d7da;color:#721c24}
+</style>
+</head>
+<body>
+<h2>LiveMetroMap - NYC WiFi Setup</h2>
+<p>Current: <strong id='current'>None</strong></p>
+<p>MAC Address: <strong id='mac'>Loading...</strong></p>
+<input type='text' id='ssid' placeholder='WiFi Name'>
+<input type='password' id='pass' placeholder='Password'>
+<button onclick='connect()'>Connect</button>
+<button onclick='clear()' style='background:#666'>Clear Settings</button>
+<div id='msg' class='msg'></div>
+<script>
+fetch('/status').then(r=>r.json()).then(d=>{
+if(d.ssid)document.getElementById('current').textContent=d.ssid;
+if(d.mac)document.getElementById('mac').textContent=d.mac;
+});
+function connect(){
+var s=document.getElementById('ssid').value;
+var p=document.getElementById('pass').value;
+if(!s){show('Enter WiFi name','error');return;}
+var x=new XMLHttpRequest();
+x.open('POST','/connect');
+x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');
+x.onload=function(){
+show(x.status==200?'Connected! Your board should start working within 30 seconds.':'Failed. Check credentials.',x.status==200?'success':'error');
+};
+x.send('ssid='+encodeURIComponent(s)+'&password='+encodeURIComponent(p));
+}
+function clear(){
+if(!confirm('Clear saved settings?'))return;
+fetch('/clear',{method:'POST'}).then(r=>{
+show('Cleared! Restarting...','success');
+});
+}
+function show(m,t){
+var e=document.getElementById('msg');
+e.textContent=m;
+e.className='msg '+t;
+e.style.display='block';
+}
+</script>
+</body>
+</html>
+)";
+
+void setup() {
+  Serial.begin(115200);
+  Serial0.begin(115200);
+  delay(1000);
+  Serial.println("Hello from Serial (USB CDC?)");
+  Serial0.println("Hello from Serial0 (UART0)");
+  Serial.println("Running Version 1.0.4");
+
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(true);
+  WiFi.mode(WIFI_STA); //Neccessary to retrieve MAC address
+  delay(100);  // Small delay for WiFi to initialize
+  mac = WiFi.macAddress();
+  
+  // Setup buttons
+  pinMode(0, INPUT_PULLUP);
+  pinMode(40, INPUT_PULLUP);
+  pinMode(41, INPUT_PULLUP);
+  pinMode(42, INPUT_PULLUP);
+  
+  // Setup LED pins
+  pinMode(4, OUTPUT);
+  pinMode(5, OUTPUT);
+  pinMode(6, OUTPUT);
+  pinMode(7, OUTPUT);
+  pinMode(15, OUTPUT);
+  pinMode(16, OUTPUT);
+  pinMode(17, OUTPUT);
+  pinMode(18, OUTPUT);
+  pinMode(21, OUTPUT);
+  pinMode(47, OUTPUT);
+  pinMode(48, OUTPUT);
+  
+  // Initialize WS2812B strips
+  ws2812b1.begin();
+  ws2812b2.begin();
+  ws2812b3.begin();
+  ws2812b4.begin();
+  ws2812b5.begin();
+  ws2812b6.begin();
+  ws2812b7.begin();
+  ws2812b8.begin();
+  
+  brightness = 10;
+  ws2812b1.setBrightness(brightness);
+  ws2812b2.setBrightness(brightness);
+  ws2812b3.setBrightness(brightness);
+  ws2812b4.setBrightness(brightness);
+  ws2812b5.setBrightness(brightness);
+  ws2812b6.setBrightness(brightness);
+  ws2812b7.setBrightness(brightness);
+  ws2812b8.setBrightness(brightness);
+
+  ws2812b1.clear();
+  ws2812b2.clear();
+  ws2812b3.clear();
+  ws2812b4.clear();
+  ws2812b5.clear();
+  ws2812b6.clear();
+  ws2812b7.clear();
+  ws2812b8.clear();
+
+    for (int pixel = 0; pixel < 141; pixel++) {
+      ws2812b1.setPixelColor(pixel, ws2812b1.Color(100, 100, 100));
+    }
+ 
+    for (int pixel = 0; pixel < 137; pixel++) {
+      ws2812b2.setPixelColor(pixel, ws2812b1.Color(100, 100, 100));
+    }
+ 
+    for (int pixel = 0; pixel < 157; pixel++) {
+      ws2812b3.setPixelColor(pixel, ws2812b1.Color(100, 100, 100));
+    } 
+
+    for (int pixel = 0; pixel < 149; pixel++) {
+      ws2812b4.setPixelColor(pixel, ws2812b1.Color(100, 100, 100));
+    }
+
+    for (int pixel = 0; pixel < 130; pixel++) {
+      ws2812b5.setPixelColor(pixel, ws2812b1.Color(100, 100, 100));
+    }
+
+    for (int pixel = 0; pixel < 128; pixel++) {
+      ws2812b6.setPixelColor(pixel, ws2812b1.Color(100, 100, 100));
+    }
+
+    for (int pixel = 0; pixel < 127; pixel++) {
+      ws2812b7.setPixelColor(pixel, ws2812b1.Color(100, 100, 100));
+    }
+
+    for (int pixel = 0; pixel < 146; pixel++) {
+      ws2812b8.setPixelColor(pixel, ws2812b1.Color(100, 100, 100));
+    }
+
+  ws2812b1.show();
+  ws2812b2.show();  
+  ws2812b3.show();  
+  ws2812b4.show();  
+  ws2812b5.show();  
+  ws2812b6.show();  
+  ws2812b7.show();  
+  ws2812b8.show();    
+  serverURL = serverURLlive;
+  
+  Serial.println("\n\nLED Controller WiFi Setup Starting...");
+  
+  // Initialize preferences
+  preferences.begin("wifi", false);
+  stored_ssid = preferences.getString("ssid", "");
+  stored_password = preferences.getString("password", "");
+  
+  // Try to connect to stored WiFi first
+  if (stored_ssid.length() > 0) {
+    Serial.println("Attempting to connect to stored WiFi: " + stored_ssid);
+    connectToWiFi(stored_ssid, stored_password);
+  }
+  
+  // If not connected, start AP mode
+  if (WiFi.status() != WL_CONNECTED) {
+    startAccessPoint();
+  } else {
+    setupWebServer();
+    delay(5000);
+    esp_ota_mark_app_valid_cancel_rollback();
+    checkForUpdates();
+  }
+}
+
+void checkForUpdates() {
+  Serial.println("Checking for firmware updates...");
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  http.begin(client, VERSION_URL);
+
+  int httpCode = http.GET();
+
+  if (httpCode == HTTP_CODE_OK) {
+    String latestVersion = http.getString();
+    latestVersion.trim();
+
+    if(latestVersion != FIRMWARE_VERSION) {
+      Serial.println("New version available - starting update!");
+      http.end();
+      performOTAUpdate();
+    } else {
+      Serial.println("No new version available");
+    }
+  } else {
+    Serial.println("Failed to check version");
+  }
+  http.end();
+}
+
+void performOTAUpdate() {
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  Serial.println("Starting OTA update");
+  setAllLEDs(0, 100, 0);
+
+
+  const esp_partition_t* update_partition = esp_ota_get_next_update_partition(NULL);
+
+  httpUpdate.onStart([]() {
+    Serial.println("OTA Update Started");
+  });
+
+  httpUpdate.onEnd([]() {
+    Serial.println("OTA Update Finished");
+  });
+
+  httpUpdate.onError([](int error) {
+    Serial.printf("Oops an error occured while performing the OTA update: %d\n", error);
+    digitalWrite(48, HIGH);
+  });
+
+  t_httpUpdate_return ret = httpUpdate.update(client, FIRMWARE_URL);
+
+  switch (ret) {
+    case HTTP_UPDATE_FAILED:
+      Serial.printf("Update failed with error %d: %s\n", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
+      digitalWrite(48, HIGH);
+      break;
+    
+    case HTTP_UPDATE_NO_UPDATES:
+      Serial.println("No new updates");
+      break;
+
+    case HTTP_UPDATE_OK:
+      Serial.println("Update success! Rebooting...");
+      delay(1000);
+      ESP.restart();
+      break;
+  }
+}
+
+
+void loop() {
+  // Handle WiFi setup web server
+  if (ap_mode) {
+    dnsServer.processNextRequest();
+  }
+  server.handleClient();
+  
+  increaseBrightness();
+  decreaseBrightness();
+  switchMode();
+  checkBootButton();
+  // Check WiFi connection status
+  /*
+  if (!ap_mode && WiFi.status() != WL_CONNECTED) {
+    static unsigned long lastDisconnectLog = 0;
+    if (millis() - lastDisconnectLog > 5000) {
+      Serial.printf("WiFi disconnected (status: %d), auto-reconnect active...\n", 
+                    WiFi.status());
+      lastDisconnectLog = millis();
+    }
+  }
+  */
+
+  static unsigned long lastDisconnectLog = 0;
+  if (!ap_mode && WiFi.status() != WL_CONNECTED) {
+    if (millis() - lastDisconnectLog > 5000) {
+      Serial.println("WiFi disconnected, auto-reconnecting...");
+      digitalWrite(21, LOW);
+      lastDisconnectLog = millis();
+    }
+  } else if (WiFi.status() == WL_CONNECTED) {
+    digitalWrite(21, HIGH);  // LED on when connected
+  }
+  
+  // Update LED colors if connected
+  if (WiFi.status() == WL_CONNECTED && (millis() - lastColorUpdate >= colorUpdateInterval) && !safemode) {
+    updateLEDColors();
+    lastColorUpdate = millis();
+  }
+
+  delay(10);
+  yield();
+}
+
+void updateLEDColors() {
+
+    //Serial.printf("=== UPDATE START - Free heap: %d bytes ===\n", ESP.getFreeHeap());
+    Serial.println("LED Update Started");
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.printf("Skipping update - WiFi status: %d\n", WiFi.status());
+      return;
+    }
+
+    WiFiClient client;
+    HTTPClient http;
+    
+    http.begin(serverURL);
+    http.setTimeout(3000);
+    http.setConnectTimeout(1000);
+    
+    int httpCode = http.GET();
+    
+    if (httpCode <= 0) {
+      Serial.printf("HTTP request failed with code: %d\n", httpCode);
+      http.end();
+      client.stop();
+      consecutiveFailures++;
+      if (consecutiveFailures >= 8) {
+        enterSafeMode();
+      }
+      return;
+    }
+
+    String payload = http.getString();
+    http.end();
+    client.stop();
+
+    
+    // Check if payload is empty
+    if (payload.length() == 0) {
+      Serial.println("Error: Empty payload received");
+      consecutiveFailures++;
+      if (consecutiveFailures >= 8) {
+        enterSafeMode();
+      }
+      return;
+    }
+
+    Serial.println("JSON Fetched");
+  
+      
+    DynamicJsonDocument doc(16384); 
+    DeserializationError error = deserializeJson(doc, payload);
+
+    
+    if (error) {
+      Serial.print("JSON parsing failed: ");
+      Serial.println(error.c_str());
+      consecutiveFailures++;
+      if (consecutiveFailures >= 8) {
+        enterSafeMode();
+      }
+      return;
+    }
+
+    JsonArray trains = doc.as<JsonArray>();
+    int size = trains.size();
+
+    if (size != 1115) {
+      consecutiveFailures++;
+      if (consecutiveFailures >= 8){
+        enterSafeMode();
+      }
+      return;
+    }
+  
+    if(live) {
+          digitalWrite(47, HIGH);
+        }
+        else {
+          digitalWrite(47, LOW);
+        }
+      
+    std::vector<std::array<int, 3>> colors;
+    colors.reserve(1115);
+      
+      if (mode) {
+        for (int train = 0; train < size; train++) {
+          if (trains[train] == "X") {
+            colors.push_back({0,0,0});
+          }
+          else if (trains[train] == "1" || trains[train] == "2" || trains[train] == "3") {
+            colors.push_back({255,0,0});
+          }
+          else if (trains[train] == "4" || trains[train] == "5" || trains[train] == "6") {
+            colors.push_back({0,255,0});
+          }
+          else if (trains[train] == "7") {
+            colors.push_back({200,0,200});
+          }
+          else if (trains[train] == "A" || trains[train] == "C" || trains[train] == "E") {
+            colors.push_back({0,0,255});
+          }
+          else if (trains[train] == "B" || trains[train] == "D" || trains[train] == "F" || trains[train] == "M") {
+            colors.push_back({255,100,0});
+          }
+          else if (trains[train] == "G") {
+            colors.push_back({100,200,0});
+          }
+          else if (trains[train] == "J" || trains[train] == "Z") {
+            colors.push_back({200,100,100});
+          }
+          else if (trains[train] == "0" || trains[train] == "H" || trains[train] == "L" || trains[train] == "S") {
+            colors.push_back({125,125,125});
+          }
+          else if (trains[train] == "N" || trains[train] == "Q" || trains[train] == "R" || trains[train] == "W") {
+            colors.push_back({150,150,0});
+          }
+          else {
+            colors.push_back({0,0,0});
+          }
+        }
+      }
+      else {
+        for (int train = 0; train < size; train++) {
+          if (trains[train] == "X") {
+            colors.push_back({0,0,0});
+          }
+          else if (trains[train] == "2" || trains[train] == "H" || trains[train] == "Q") {
+            colors.push_back({255,0,0});
+          }
+          else if (trains[train] == "1" || trains[train] == "7" || trains[train] == "D" || trains[train] == "W" || trains[train] == "Z") {
+            colors.push_back({255,100,0});
+          }
+          else if (trains[train] == "6" || trains[train] == "N") {
+            colors.push_back({150,150,0});
+          }
+          else if (trains[train] == "0" || trains[train] == "C" || trains[train] == "G" || trains[train] == "R" || trains[train] == "S") {
+            colors.push_back({0,255,0});
+          }
+          else if (trains[train] == "3" || trains[train] == "E") {
+            colors.push_back({0,150,150});
+          }
+          else if (trains[train] == "A" || trains[train] == "M") {
+            colors.push_back({0,0,255});
+          }
+          else if (trains[train] == "4" || trains[train] == "F") {
+            colors.push_back({200,0,200});
+          }
+          else if (trains[train] == "5" || trains[train] == "B" || trains[train] == "J" || trains[train] == "L") {
+            colors.push_back({125,125,125});
+          }
+          else {
+            colors.push_back({0,0,0});
+          }
+        }
+      }
+
+      // Update Strip 1
+      ws2812b1.clear();
+      for (int pixel = 0; pixel < 141; pixel++) {
+        ws2812b1.setPixelColor(pixel, ws2812b1.Color(colors[pixel][0], colors[pixel][1], colors[pixel][2]));
+      }
+      ws2812b1.show();
+
+      // Update Strip 2
+      ws2812b2.clear();
+      for (int pixel = 141; pixel < 278; pixel++) {
+        ws2812b2.setPixelColor(pixel - 141, ws2812b2.Color(colors[pixel][0], colors[pixel][1], colors[pixel][2]));
+      }
+      ws2812b2.show();
+
+      // Update Strip 3
+      ws2812b3.clear();
+      for (int pixel = 278; pixel < 435; pixel++) {
+        ws2812b3.setPixelColor(pixel - 278, ws2812b3.Color(colors[pixel][0], colors[pixel][1], colors[pixel][2])); 
+      }
+      ws2812b3.show();
+
+      // Update Strip 4
+      ws2812b4.clear();
+      for (int pixel = 435; pixel < 584; pixel++) {
+        ws2812b4.setPixelColor(pixel - 435, ws2812b4.Color(colors[pixel][0], colors[pixel][1], colors[pixel][2])); 
+      }
+      ws2812b4.show();
+
+      // Update Strip 5
+      ws2812b5.clear();
+      for (int pixel = 584; pixel < 714; pixel++) {
+        ws2812b5.setPixelColor(pixel - 584, ws2812b5.Color(colors[pixel][0], colors[pixel][1], colors[pixel][2])); 
+      }
+      pinMode(16, OUTPUT);
+      digitalWrite(16, LOW);
+      ws2812b5.show();
+
+      // Update Strip 6
+      ws2812b6.clear();
+      for (int pixel = 714; pixel < 842; pixel++) {
+        ws2812b6.setPixelColor(pixel - 714, ws2812b6.Color(colors[pixel][0], colors[pixel][1], colors[pixel][2])); 
+      }
+      ws2812b6.show();
+
+      // Update Strip 7
+      ws2812b7.clear();
+      for (int pixel = 842; pixel < 969; pixel++) {
+        ws2812b7.setPixelColor(pixel - 842, ws2812b7.Color(colors[pixel][0], colors[pixel][1], colors[pixel][2]));  
+      }
+      ws2812b7.show();
+
+      // Update Strip 8
+      ws2812b8.clear();
+      for (int pixel = 969; pixel < 1115; pixel++) {
+        ws2812b8.setPixelColor(pixel - 969, ws2812b8.Color(colors[pixel][0], colors[pixel][1], colors[pixel][2]));  
+      }
+      ws2812b8.show();
+
+
+      digitalWrite(48, LOW);
+      consecutiveFailures = 0;
+
+      //Serial.printf("=== UPDATE END - Free heap: %d bytes ===\n", ESP.getFreeHeap());
+      Serial.println("Succesdful update");
+    
+} 
+
+void enterSafeMode() {
+  Serial.println("Entering safe mode due to repeated failures");
+  safemode = true;
+  
+  digitalWrite(48, HIGH);
+
+  setAllLEDs(100, 0, 0);
+  
+  //consecutiveFailures = 0;
+}
+
+// Helper to set all LEDs to one color
+void setAllLEDs(uint8_t r, uint8_t g, uint8_t b) {
+  uint32_t color = ws2812b1.Color(r, g, b);
+  
+  ws2812b1.fill(color);
+  ws2812b2.fill(color);
+  ws2812b3.fill(color);
+  ws2812b4.fill(color);
+  ws2812b5.fill(color);
+  ws2812b6.fill(color);
+  ws2812b7.fill(color);
+  ws2812b8.fill(color);
+  
+  ws2812b1.show();
+  ws2812b2.show();
+  ws2812b3.show();
+  ws2812b4.show();
+  ws2812b5.show();
+  ws2812b6.show();
+  ws2812b7.show();
+  ws2812b8.show();
+}
+
+void checkBootButton() {
+  static unsigned long bootButtonPressTime = 0;
+  static bool bootButtonPressed = false;
+
+  if (digitalRead(0) == LOW) {
+    if (!bootButtonPressed) {
+      bootButtonPressed = true;
+      bootButtonPressTime = millis();
+    } else if (millis() - bootButtonPressTime > 3000) {
+      // Held for 3 seconds - wipe credentials and restart
+      Serial.println("Reset button held - clearing WiFi credentials and restarting...");
+      
+      // Flash LEDs red to confirm reset
+      setAllLEDs(255, 0, 0);
+      delay(500);
+      setAllLEDs(0, 0, 0);
+      delay(500);
+      setAllLEDs(255, 0, 0);
+      delay(500);
+      
+      preferences.clear();
+      delay(500);
+      ESP.restart();
+    }
+  } else {
+    bootButtonPressed = false;
+  }
+}
+
+void increaseBrightness() {
+  static unsigned long lastUpUpdate = 0;
+  if (digitalRead(40) == LOW) {
+    if (!brightnessUpPressed) {
+      brightnessUpPressed = true;
+      lastUpUpdate = millis();
+    } else if (millis() - lastUpUpdate > 200) {
+      if (brightness + 2 <= 16) {
+        brightness = brightness + 2;
+        ws2812b1.setBrightness(brightness);
+        ws2812b2.setBrightness(brightness);
+        ws2812b3.setBrightness(brightness);
+        ws2812b4.setBrightness(brightness);
+        ws2812b5.setBrightness(brightness);
+        ws2812b6.setBrightness(brightness);
+        ws2812b7.setBrightness(brightness);
+        ws2812b8.setBrightness(brightness);
+        ws2812b1.show();
+        ws2812b2.show();
+        ws2812b3.show();
+        ws2812b4.show();
+        pinMode(16, OUTPUT);
+        digitalWrite(16, LOW);
+        ws2812b5.show();
+        ws2812b6.show();
+        ws2812b7.show();
+        ws2812b8.show();
+        lastUpUpdate = millis();
+      }
+    }
+  } else {
+    brightnessUpPressed = false;
+  }
+}
+
+void decreaseBrightness() {
+  static unsigned long lastDownUpdate = 0;
+  if (digitalRead(41) == LOW) {
+    if (!brightnessDownPressed) {
+      brightnessDownPressed = true;
+      lastDownUpdate = millis();
+    } else if (millis() - lastDownUpdate > 200) {
+      if (brightness - 2 >= 0) {
+        brightness = brightness - 2;
+        ws2812b1.setBrightness(brightness);
+        ws2812b2.setBrightness(brightness);
+        ws2812b3.setBrightness(brightness);
+        ws2812b4.setBrightness(brightness);
+        ws2812b5.setBrightness(brightness);
+        ws2812b6.setBrightness(brightness);
+        ws2812b7.setBrightness(brightness);
+        ws2812b8.setBrightness(brightness);
+        ws2812b1.show();
+        ws2812b2.show();
+        ws2812b3.show();
+        ws2812b4.show();
+        pinMode(16, OUTPUT);
+        digitalWrite(16, LOW);
+        ws2812b5.show();
+        ws2812b6.show();
+        ws2812b7.show();
+        ws2812b8.show();
+        lastDownUpdate = millis();
+      }
+    }
+  }
+  else {
+    brightnessDownPressed = false;
+  }
+}
+
+void switchMode() {
+  static bool modeToggled = false;
+  static bool shortPressHandled = false;
+
+  if (digitalRead(42) == LOW) {
+    if(!modeButtonPressed) {
+      modeButtonPressed = true;
+      modeButtonPressTime = millis();
+      modeToggled = false;
+      shortPressHandled = false;
+    } else if (millis() - modeButtonPressTime > 3000 && !modeToggled) {
+      if (live) {
+        digitalWrite(47, LOW);
+        serverURL = serverURLbackup;
+        live = false;
+        modeToggled = true;
+      } else {
+        digitalWrite(47, HIGH);
+        serverURL = serverURLlive;
+        live = true;
+        modeToggled = true;
+      }
+    }
+  } else {
+    if (modeButtonPressed && !modeToggled && !shortPressHandled) {
+      unsigned long pressDuration = millis() - modeButtonPressTime;
+      if (pressDuration > 50 && pressDuration < 3000) {
+        mode = !mode;
+        shortPressHandled = true;
+        updateLEDColors();
+      }
+    }
+    modeButtonPressed = false;
+    shortPressHandled = false;
+  }
+}
+
+void startAccessPoint() {
+  Serial.println("Starting Access Point Mode...");
+  ap_mode = true;
+  
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ap_ssid, ap_password);
+  
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("AP IP address: ");
+  Serial.println(IP);
+  
+  dnsServer.start(53, "*", IP);
+  setupWebServer();
+
+  digitalWrite(21, LOW);
+  digitalWrite(47, LOW);
+  
+  Serial.println("Access Point started - Connect to 'ESP32-LED-Setup' to configure WiFi");
+}
+
+void setupWebServer() {
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/status", HTTP_GET, handleStatus);
+  server.on("/connect", HTTP_POST, handleConnect);
+  server.on("/clear", HTTP_POST, handleClear);
+  server.onNotFound(handleRoot);
+  
+  server.begin();
+  Serial.println("Web server started");
+}
+
+void handleRoot() {
+  server.send(200, "text/html", html_page);
+}
+
+void handleStatus() {
+  bool wifi_connected = (WiFi.status() == WL_CONNECTED);
+  String json = "{\"ssid\":\"" + stored_ssid + "\",\"connected\":" + 
+                (wifi_connected ? "true" : "false") + ",\"mac\":\"" + mac + "\"}";
+  server.send(200, "application/json", json);
+}
+
+void handleConnect() {
+  String ssid = server.arg("ssid");
+  String password = server.arg("password");
+  
+  Serial.println("Received WiFi credentials:");
+  Serial.println("SSID: " + ssid);
+  
+  preferences.putString("ssid", ssid);
+  preferences.putString("password", password);
+  stored_ssid = ssid;
+  stored_password = password;
+  
+  if (connectToWiFi(ssid, password)) {
+    server.send(200, "text/plain", "Success");
+  } else {
+    server.send(500, "text/plain", "Failed");
+  }
+}
+
+void handleClear() {
+  Serial.println("Clearing stored WiFi credentials...");
+  preferences.clear();
+  stored_ssid = "";
+  stored_password = "";
+  server.send(200, "text/plain", "Cleared");
+  delay(1000);
+  ESP.restart();
+}
+
+bool connectToWiFi(String ssid, String password) {
+  Serial.println("Connecting to WiFi: " + ssid);
+
+    if (ap_mode) {
+    WiFi.mode(WIFI_AP_STA);
+  } else {
+    WiFi.mode(WIFI_STA);
+  }
+  
+  WiFi.begin(ssid.c_str(), password.c_str());
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+    yield();
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi Connected!");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+    digitalWrite(21, HIGH);
+
+    if (ap_mode) {
+      Serial.println("Shutting down Access Point...");
+      dnsServer.stop();
+      WiFi.softAPdisconnect(true);  // Disconnect AP and disable
+      delay(100);
+      WiFi.mode(WIFI_STA);  // Switch to Station-only mode
+      ap_mode = false;
+      Serial.println("Access Point shut down - now in Station mode only");
+    }
+
+    return true;
+  } else {
+    Serial.println("\nWiFi Connection Failed");
+    digitalWrite(21, LOW);
+    digitalWrite(47, LOW);
+    return false;
+  }
+}
