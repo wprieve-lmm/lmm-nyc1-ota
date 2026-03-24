@@ -1,8 +1,6 @@
 #include <Adafruit_NeoPixel.h>
 #include <vector>
 #include <array>
-#include <string>
-#include <iostream>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
@@ -29,8 +27,8 @@ const char* serverURL;
 
 // Random UUID for BLE
 
-#define SERVICE_UUID "24218350-9437-4547-b2c7-9a32c175cb46";
-#define CHARACTERISTIC_UUID "6eec36ed-4f98-432b-bf39-101574418fea";
+#define SERVICE_UUID "24218350-9437-4547-b2c7-9a32c175cb46"
+#define CHARACTERISTIC_UUID "6eec36ed-4f98-432b-bf39-101574418fea"
 
 //Firmware update info
 
@@ -73,76 +71,27 @@ Adafruit_NeoPixel ws2812b8(146, 18, NEO_GRB + NEO_KHZ800);
 
 //HTML page for WiFi setup
 const char* html_page = R"(
-<!DOCTYPE html>
-<html>
-<head>
-<meta name='viewport' content='width=device-width,initial-scale=1'>
-<title>LiveMetroMap - NYC WiFi Setup</title>
-<style>
-body{font-family:Arial;max-width:400px;margin:50px auto;padding:20px}
-h2{color:#0066cc}
-input,button{width:100%;padding:10px;margin:10px 0;box-sizing:border-box;font-size:16px}
-button{background:#0066cc;color:#fff;border:none;cursor:pointer}
-button:hover{background:#0052a3}
-.msg{padding:10px;margin:10px 0;border-radius:4px;display:none}
-.success{background:#d4edda;color:#155724}
-.error{background:#f8d7da;color:#721c24}
-</style>
-</head>
-<body>
-<h2>LiveMetroMap - NYC WiFi Setup</h2>
-<p>Current: <strong id='current'>None</strong></p>
-<p>MAC Address: <strong id='mac'>Loading...</strong></p>
-<input type='text' id='ssid' placeholder='WiFi Name'>
-<input type='password' id='pass' placeholder='Password'>
-<button onclick='connect()'>Connect</button>
-<button onclick='clear()' style='background:#666'>Clear Settings</button>
-<div id='msg' class='msg'></div>
+<html><body>
+<p>MAC: <span id='m'></span></p>
+<input id='s' placeholder='WiFi'><input id='p' type='password' placeholder='Pass'>
+<button onclick='c()'>Connect</button>
 <script>
-fetch('/status').then(r=>r.json()).then(d=>{
-if(d.ssid)document.getElementById('current').textContent=d.ssid;
-if(d.mac)document.getElementById('mac').textContent=d.mac;
-});
-function connect(){
-var s=document.getElementById('ssid').value;
-var p=document.getElementById('pass').value;
-if(!s){show('Enter WiFi name','error');return;}
-var x=new XMLHttpRequest();
-x.open('POST','/connect');
-x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');
-x.onload=function(){
-show(x.status==200?'Connected! Your board should start working within 30 seconds.':'Failed. Check credentials.',x.status==200?'success':'error');
-};
-x.send('ssid='+encodeURIComponent(s)+'&password='+encodeURIComponent(p));
-}
-function clear(){
-if(!confirm('Clear saved settings?'))return;
-fetch('/clear',{method:'POST'}).then(r=>{
-show('Cleared! Restarting...','success');
-});
-}
-function show(m,t){
-var e=document.getElementById('msg');
-e.textContent=m;
-e.className='msg '+t;
-e.style.display='block';
-}
-</script>
-</body>
-</html>
+fetch('/status').then(r=>r.json()).then(d=>{document.getElementById('m').textContent=d.mac});
+function c(){var x=new XMLHttpRequest();x.open('POST','/connect');x.setRequestHeader('Content-Type','application/x-www-form-urlencoded');x.send('ssid='+encodeURIComponent(document.getElementById('s').value)+'&password='+encodeURIComponent(document.getElementById('p').value));}
+</script></body></html>
 )";
 
 //The Arduino/C++ class for handling bluetooth
 class CommandCallback : public BLECharacteristicCallbacks {
   //Overrides the default onWrite method
-  void onWrite(BLECharacteristics* pointer) //Points to a BLE Characteristic (Brightness, Refresh, etc 
+  void onWrite(BLECharacteristic* pointer) //Points to a BLE Characteristic (Brightness, Refresh, etc 
   {
     String val = pointer->getValue().c_str();
 
     if (val.startsWith("BRIGHTNESS:")) {
-      int newBrightness = val.subString(11).toInt(); //Example: The String being passed in for a desired brightness of 10 would be "Brightness:10"
+      int newBrightness = val.substring(11).toInt(); //Example: The String being passed in for a desired brightness of 10 would be "Brightness:10"
       if (0 <= newBrightness && 16 >= newBrightness){
-        brightness = newBrightness
+        brightness = newBrightness;
       }
     }
     else if (val.startsWith("INTERVAL:")) {
@@ -155,7 +104,7 @@ class CommandCallback : public BLECharacteristicCallbacks {
       mode = !mode;
     }
   }
-}
+};
 
 //This chunk I pretty much directly copied off the internet due to the specific functions involved
 void setupBLE() {
@@ -228,55 +177,8 @@ void setup() {
   ws2812b7.setBrightness(brightness);
   ws2812b8.setBrightness(brightness);
 
-  ws2812b1.clear();
-  ws2812b2.clear();
-  ws2812b3.clear();
-  ws2812b4.clear();
-  ws2812b5.clear();
-  ws2812b6.clear();
-  ws2812b7.clear();
-  ws2812b8.clear();
+  setAllLEDs(100, 100, 100);
 
-    for (int pixel = 0; pixel < 141; pixel++) {
-      ws2812b1.setPixelColor(pixel, ws2812b1.Color(100, 100, 100));
-    }
- 
-    for (int pixel = 0; pixel < 137; pixel++) {
-      ws2812b2.setPixelColor(pixel, ws2812b1.Color(100, 100, 100));
-    }
- 
-    for (int pixel = 0; pixel < 157; pixel++) {
-      ws2812b3.setPixelColor(pixel, ws2812b1.Color(100, 100, 100));
-    } 
-
-    for (int pixel = 0; pixel < 149; pixel++) {
-      ws2812b4.setPixelColor(pixel, ws2812b1.Color(100, 100, 100));
-    }
-
-    for (int pixel = 0; pixel < 130; pixel++) {
-      ws2812b5.setPixelColor(pixel, ws2812b1.Color(100, 100, 100));
-    }
-
-    for (int pixel = 0; pixel < 128; pixel++) {
-      ws2812b6.setPixelColor(pixel, ws2812b1.Color(100, 100, 100));
-    }
-
-    for (int pixel = 0; pixel < 127; pixel++) {
-      ws2812b7.setPixelColor(pixel, ws2812b1.Color(100, 100, 100));
-    }
-
-    for (int pixel = 0; pixel < 146; pixel++) {
-      ws2812b8.setPixelColor(pixel, ws2812b1.Color(100, 100, 100));
-    }
-
-  ws2812b1.show();
-  ws2812b2.show();  
-  ws2812b3.show();  
-  ws2812b4.show();  
-  ws2812b5.show();  
-  ws2812b6.show();  
-  ws2812b7.show();  
-  ws2812b8.show();    
   serverURL = serverURLlive;
   
   Serial.println("\n\nLED Controller WiFi Setup Starting...");
@@ -388,17 +290,6 @@ void loop() {
   decreaseBrightness();
   switchMode();
   checkBootButton();
-  // Check WiFi connection status
-  /*
-  if (!ap_mode && WiFi.status() != WL_CONNECTED) {
-    static unsigned long lastDisconnectLog = 0;
-    if (millis() - lastDisconnectLog > 5000) {
-      Serial.printf("WiFi disconnected (status: %d), auto-reconnect active...\n", 
-                    WiFi.status());
-      lastDisconnectLog = millis();
-    }
-  }
-  */
 
   static unsigned long lastDisconnectLog = 0;
   if (!ap_mode && WiFi.status() != WL_CONNECTED) {
@@ -468,7 +359,7 @@ void updateLEDColors() {
     Serial.println("JSON Fetched");
   
       
-    DynamicJsonDocument doc(16384); 
+    DynamicJsonDocument doc(12288); 
     DeserializationError error = deserializeJson(doc, payload);
 
     
