@@ -53,9 +53,11 @@ bool modeButtonPressed = false;
 unsigned long modeButtonPressTime = 0;
 unsigned long lastColorUpdate = 0;
 unsigned long colorUpdateInterval = 10000; // 10 seconds
+unsigned long lastCommand = 0;
 
 // LED Strip Configuration
 int brightness = 10;
+String selectedLine = "All Lines";
 int consecutiveFailures = 0;
 bool brightnessChanged = false;
 
@@ -100,6 +102,10 @@ class CommandCallback : public BLECharacteristicCallbacks {
       if (5 <= newInterval && newInterval >= 30){
         colorUpdateInterval = newInterval * 1000;
       }
+    }
+    else if (val.startsWith("LINE:")){
+      selectedLine = val.substring(5);
+      Serial.println("Line selected: " selectedLine);
     }
     else if (val == "MODE") {
       mode = !mode;
@@ -229,8 +235,9 @@ void setup() {
 
 void loop() {
 
-  if (brightnessChanged) {
+  if (brightnessChanged && (millis() - lastCommand > 500)) {
     brightnessChanged = false;
+    lastCommand = millis();
      ws2812b1.setBrightness(brightness);
      ws2812b2.setBrightness(brightness);
      ws2812b3.setBrightness(brightness);
@@ -347,6 +354,14 @@ void updateLEDColors() {
 
     JsonArray trains = doc.as<JsonArray>();
     int size = trains.size();
+
+    if (selectedLine != "All Lines") {
+      for (int i = 0; i < size; i ++) {
+        if (trains[i] != selectedLine) {
+          trains[i] = "X";
+        }
+      }
+    }
 
     if (size != 1115) {
       consecutiveFailures++;
